@@ -1,20 +1,22 @@
 const Lexer = @import("./lexer.zig").Lexer;
+const Token = @import("./lexer.zig").Token;
 
 const JsonValue = @import("./root.zig").JsonValue;
 
 const std = @import("std");
 
-pub fn parse(src: []const u8) !JsonValue {
+pub fn parse(src: []const u8, arena: *std.heap.ArenaAllocator) !JsonValue {
+    var allocator = arena.allocator();
     var lexer = Lexer.init(src);
 
     const val: JsonValue = switch (lexer.nextToken()) {
-        .string => |str| .{ .string = str },
+        .string => |str| .{ .string = try allocator.dupe(u8, str) },
         .number => |num| .{ .number = try std.fmt.parseFloat(f64, num) },
         .true => .{ .boolean = true },
         .false => .{ .boolean = false },
         .null, .eof => .null,
-        .lbracket => try parseArray(&lexer),
-        .lbrace => try parseObject(&lexer),
+        .lbracket => try parseArray(&lexer, allocator),
+        .lbrace => try parseObject(&lexer, allocator),
         else => return error.BadJson,
     };
 
@@ -23,21 +25,12 @@ pub fn parse(src: []const u8) !JsonValue {
     return error.BadJson;
 }
 
-fn parseArray(lexer: *Lexer) anyerror!JsonValue {
+fn parseArray(lexer: *Lexer, allocator: std.mem.Allocator) anyerror!JsonValue {
     var token = lexer.nextToken();
-    var array = std.ArrayList(JsonValue).init(std.heap.page_allocator);
+    var array = std.ArrayList(JsonValue).init(allocator);
 
     while (token != .rbracket) {
-        switch (token) {
-            .null => try array.append(.null),
-            .string => |str| try array.append(.{ .string = str }),
-            .true => try array.append(.{ .boolean = true }),
-            .false => try array.append(.{ .boolean = false }),
-            .number => |num| try array.append(.{ .number = try std.fmt.parseFloat(f64, num) }),
-            .lbracket => try array.append(try parseArray(lexer)),
-            .lbrace => try array.append(try parseObject(lexer)),
-            .illegal, .eof, .rbrace, .colon, .comma, .rbracket => return error.BadJson,
-        }
+        try array.append(try tokenToValue(lexer, token, allocator));
 
         token = lexer.nextToken();
         if (token != .comma and token != .rbracket) return error.BadJson;
@@ -48,9 +41,9 @@ fn parseArray(lexer: *Lexer) anyerror!JsonValue {
     return .{ .array = array };
 }
 
-fn parseObject(lexer: *Lexer) anyerror!JsonValue {
+fn parseObject(lexer: *Lexer, allocator: std.mem.Allocator) anyerror!JsonValue {
     var token = lexer.nextToken();
-    var object = std.StringHashMap(JsonValue).init(std.heap.page_allocator);
+    var object = std.StringHashMap(JsonValue).init(allocator);
 
     while (token != .rbrace) {
         if (token != .string) return error.BadJson;
@@ -59,16 +52,7 @@ fn parseObject(lexer: *Lexer) anyerror!JsonValue {
         const key = token.string;
         token = lexer.nextToken();
 
-        switch (token) {
-            .null => try object.put(key, .null),
-            .string => |str| try object.put(key, .{ .string = str }),
-            .true => try object.put(key, .{ .boolean = true }),
-            .false => try object.put(key, .{ .boolean = false }),
-            .number => |num| try object.put(key, .{ .number = try std.fmt.parseFloat(f64, num) }),
-            .lbracket => try object.put(key, try parseArray(lexer)),
-            .lbrace => try object.put(key, try parseObject(lexer)),
-            .illegal, .eof, .rbrace, .colon, .comma, .rbracket => return error.BadJson,
-        }
+        try object.put(key, try tokenToValue(lexer, token, allocator));
 
         token = lexer.nextToken();
         if (token != .comma and token != .rbrace) return error.BadJson;
@@ -77,4 +61,17 @@ fn parseObject(lexer: *Lexer) anyerror!JsonValue {
     }
 
     return .{ .object = object };
+}
+
+fn tokenToValue(lexer: *Lexer, token: Token, allocator: std.mem.Allocator) anyerror!JsonValue {
+    return switch (token) {
+        .string => |str| .{ .string = try allocator.dupe(u8, str) },
+        .number => |num| .{ .number = try std.fmt.parseFloat(f64, num) },
+        .true => .{ .boolean = true },
+        .false => .{ .boolean = false },
+        .null => .null,
+        .lbracket => try parseArray(lexer, allocator),
+        .lbrace => try parseObject(lexer, allocator),
+        else => return error.BadJson,
+    };
 }
